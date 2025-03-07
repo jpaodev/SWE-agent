@@ -6,7 +6,7 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field
 from swerex.deployment.abstract import AbstractDeployment
-from swerex.deployment.config import DeploymentConfig, DockerDeploymentConfig, get_deployment
+from swerex.deployment.config import DeploymentConfig, DockerDeploymentConfig, get_deployment, LocalDeploymentConfig
 from swerex.runtime.abstract import (
     BashAction,
     BashInterruptAction,
@@ -25,7 +25,7 @@ class EnvironmentConfig(BaseModel):
     """Configure data sources and setup instructions for the environment in which we solve the tasks."""
 
     deployment: DeploymentConfig = Field(
-        default_factory=lambda: DockerDeploymentConfig(image="python:3.11", python_standalone_dir="/root"),
+        default_factory=lambda: LocalDeploymentConfig(),
         description="Deployment options.",
     )
     repo: RepoConfig | None = Field(
