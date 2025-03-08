@@ -102,6 +102,7 @@ class RunSingleConfig(BaseSettings, cli_implicit_flags=False):
             ACS("per_instance_cost_limit", "agent.model.per_instance_cost_limit"),
             ACS("model.per_instance_cost_limit", "agent.model.per_instance_cost_limit"),
             ACS("config_file", "config"),
+            ACS("google_project", "agent.model.google_project"),
             ACS(
                 "data_path",
                 help="--data_path is no longer support for SWE-A 1.0. Please check the tutorial and use one of the --problem_statement options, e.g., --problem_statement.github_url or --problem_statement.path",

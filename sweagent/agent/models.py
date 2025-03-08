@@ -129,6 +129,9 @@ class GenericAPIModelConfig(PydanticBaseModel):
     Set this to 0 to disable this check.
     """
 
+    google_project: str | None = None
+    """Google project to use for the model. This is useful for models that require a Google project set in LiteLLM"""
+    
     # pydantic
     model_config = ConfigDict(extra="forbid")
 
