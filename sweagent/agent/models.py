@@ -651,9 +651,10 @@ class LiteLLMModel(AbstractModel):
             completion_kwargs["max_tokens"] = self.model_max_output_tokens
         try:
             from openai import OpenAI
+            openai_api_base = os.getenv("OPENAI_API_BASE", "https://api.openai.com")
             client = OpenAI(
                 api_key=self.config.choose_api_key(),
-                base_url=self.config.api_base,
+                base_url=openai_api_base,
             )
             
             
@@ -783,17 +784,17 @@ class LiteLLMModel(AbstractModel):
         self, messages: list[dict[str, str]], n: int | None = None, temperature: float | None = None
     ) -> list[dict]:
         if n is None:
-            # if os.getenv("USE_LITE_LLM", "false").lower() == "true":
-            #     return self._single_query(messages, temperature=temperature)
-            # else:
-            return self._single_query_oai(messages, temperature=temperature)
+            if os.getenv("USE_LITE_LLM", "false").lower() == "true":
+                return self._single_query(messages, temperature=temperature)
+            else:
+                return self._single_query_oai(messages, temperature=temperature)
         outputs = []
         # not needed for openai, but oh well.
         for _ in range(n):
-            # if os.getenv("USE_LITE_LLM", "false").lower() == "true":
-            #     outputs.extend(self._single_query(messages))
-            # else:
-            outputs.extend(self._single_query_oai(messages))
+            if os.getenv("USE_LITE_LLM", "false").lower() == "true":
+                outputs.extend(self._single_query(messages))
+            else:
+                outputs.extend(self._single_query_oai(messages))
         return outputs
 
     def query(self, history: History, n: int = 1, temperature: float | None = None) -> list[dict] | dict:
