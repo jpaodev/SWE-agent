@@ -630,7 +630,6 @@ class LiteLLMModel(AbstractModel):
     def _single_query_oai(self, messages: list[dict[str, str]], n: int | None = None, temperature: float | None = None) -> list[dict]:
         self._sleep()
         input_tokens: int = litellm.utils.token_counter(messages=messages, model=self.config.name)
-        # if os.getenv("USE_LITE_LLM", "false").lower() == "true":
         
         if self.model_max_input_tokens is None:
             msg = (
@@ -778,11 +777,17 @@ class LiteLLMModel(AbstractModel):
         self, messages: list[dict[str, str]], n: int | None = None, temperature: float | None = None
     ) -> list[dict]:
         if n is None:
-            return self._single_query(messages, temperature=temperature)
+            if os.getenv("USE_LITE_LLM", "false").lower() == "true":
+                return self._single_query(messages, temperature=temperature)
+            else:
+                return self._single_query_oai(messages, temperature=temperature)
         outputs = []
         # not needed for openai, but oh well.
         for _ in range(n):
-            outputs.extend(self._single_query(messages))
+            if os.getenv("USE_LITE_LLM", "false").lower() == "true":
+                outputs.extend(self._single_query(messages))
+            else:
+                outputs.extend(self._single_query_oai(messages))
         return outputs
 
     def query(self, history: History, n: int = 1, temperature: float | None = None) -> list[dict] | dict:
