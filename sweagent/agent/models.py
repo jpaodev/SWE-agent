@@ -14,6 +14,7 @@ from typing import Annotated, Any, Literal
 
 import litellm
 import litellm.types.utils
+import openai
 from pydantic import BaseModel as PydanticBaseModel
 from pydantic import ConfigDict, Field, SecretStr
 from swerex.exceptions import SwerexException
@@ -626,6 +627,78 @@ class LiteLLMModel(AbstractModel):
         with GLOBAL_STATS_LOCK:
             GLOBAL_STATS.last_query_timestamp = time.time()
 
+    def _single_query_oai(self, messages: list[dict[str, str]], n: int | None = None, temperature: float | None = None) -> list[dict]:
+        self._sleep()
+        input_tokens: int = litellm.utils.token_counter(messages=messages, model=self.config.name)
+        # if os.getenv("USE_LITE_LLM", "false").lower() == "true":
+        
+        if self.model_max_input_tokens is None:
+            msg = (
+                f"No max input tokens found for model {self.config.name!r}. "
+                "If you are using a local model, you can set `max_input_token` in the model config to override this."
+            )
+            self.logger.warning(msg)
+        elif input_tokens > self.model_max_input_tokens > 0:
+            msg = f"Input tokens {input_tokens} exceed max tokens {self.model_max_input_tokens}"
+            raise ContextWindowExceededError(msg)
+        extra_args = {}
+        
+        if self.tools.use_function_calling:
+            extra_args["tools"] = self.tools.tools
+        # We need to always set max_tokens for anthropic models
+        completion_kwargs = self.config.completion_kwargs
+        if self.lm_provider == "anthropic":
+            completion_kwargs["max_tokens"] = self.model_max_output_tokens
+        try:
+            from openai import OpenAI
+            client = OpenAI(
+                api_key=self.config.choose_api_key(),
+                base_url=self.config.api_base,
+            )
+            
+            
+            response = client.chat.completions.create(model=self.config.name, messages=messages, temperature=self.config.temperature if temperature is None else temperature, top_p=self.config.top_p, **completion_kwargs, **extra_args, n=n)
+      
+        except openai._exceptions.BadRequestError as e:
+            raise ContextWindowExceededError from e
+        except litellm.exceptions.ContentPolicyViolationError as e:
+            raise ContentPolicyViolationError from e
+        except litellm.exceptions.BadRequestError as e:
+            if "is longer than the model's context length" in str(e):
+                raise ContextWindowExceededError from e
+            raise
+        self.logger.info(f"Response: {response}")
+        try:
+            cost = litellm.cost_calculator.completion_cost(response)
+        except Exception as e:
+            self.logger.debug(f"Error calculating cost: {e}, setting cost to 0.")
+            if self.config.per_instance_cost_limit > 0 or self.config.total_cost_limit > 0:
+                msg = (
+                    f"Error calculating cost: {e} for your model {self.config.name}. If this is ok "
+                    "(local models, etc.), please make sure you set `per_instance_cost_limit` and "
+                    "`total_cost_limit` to 0 to disable this safety check."
+                )
+                self.logger.error(msg)
+                raise ModelConfigurationError(msg)
+            cost = 0
+        choices: litellm.types.utils.Choices = response.choices # type: ignore
+        n_choices = n if n is not None else 1
+        outputs = []
+        output_tokens = 0
+        for i in range(n_choices):
+            output = choices[i].message.content or ""
+            output_tokens += litellm.utils.token_counter(text=output, model=self.config.name)
+            output_dict = {"message": output}
+            if self.tools.use_function_calling:
+                if response.choices[i].message.tool_calls:  # type: ignore
+                    tool_calls = [call.to_dict() for call in response.choices[i].message.tool_calls]  # type: ignore
+                else:
+                    tool_calls = []
+                output_dict["tool_calls"] = tool_calls
+            outputs.append(output_dict)
+        self._update_stats(input_tokens=input_tokens, output_tokens=output_tokens, cost=cost)
+        return outputs
+    
     def _single_query(
         self, messages: list[dict[str, str]], n: int | None = None, temperature: float | None = None
     ) -> list[dict]:
@@ -663,13 +736,11 @@ class LiteLLMModel(AbstractModel):
                 **extra_args,
                 n=n,
             )
-        except litellm.exceptions.ContextWindowExceededError as e:
-            raise ContextWindowExceededError from e
-        except litellm.exceptions.ContentPolicyViolationError as e:
-            raise ContentPolicyViolationError from e
-        except litellm.exceptions.BadRequestError as e:
-            if "is longer than the model's context length" in str(e):
+        except openai.BadRequestError as e:
+            if "maximum context length" in str(e) or "context length exceeded" in str(e):
                 raise ContextWindowExceededError from e
+            elif "content management policy" in str(e):
+                raise ContentPolicyViolationError from e
             raise
         self.logger.info(f"Response: {response}")
         try:
