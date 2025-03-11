@@ -10,6 +10,7 @@ import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 from threading import Lock
+import traceback
 from typing import Annotated, Any, Literal
 
 import litellm
@@ -658,14 +659,16 @@ class LiteLLMModel(AbstractModel):
             
             response = client.chat.completions.create(model=self.config.name, messages=messages, temperature=self.config.temperature if temperature is None else temperature, top_p=self.config.top_p, **completion_kwargs, **extra_args, n=n)
       
-        except openai._exceptions.BadRequestError as e:
-            raise ContextWindowExceededError from e
-        except litellm.exceptions.ContentPolicyViolationError as e:
-            raise ContentPolicyViolationError from e
-        except litellm.exceptions.BadRequestError as e:
-            if "is longer than the model's context length" in str(e):
+        except Exception as e:
+            print("Exception occurred {e}")
+            print(traceback.format_exc())
+        except openai.BadRequestError as e:
+            if "maximum context length" in str(e) or "context length exceeded" in str(e):
                 raise ContextWindowExceededError from e
+            elif "content management policy" in str(e):
+                raise ContentPolicyViolationError from e
             raise
+        
         self.logger.info(f"Response: {response}")
         try:
             cost = litellm.cost_calculator.completion_cost(response)
@@ -735,11 +738,13 @@ class LiteLLMModel(AbstractModel):
                 **extra_args,
                 n=n,
             )
-        except openai.BadRequestError as e:
-            if "maximum context length" in str(e) or "context length exceeded" in str(e):
+        except litellm.exceptions.ContextWindowExceededError as e:
+            raise ContextWindowExceededError from e
+        except litellm.exceptions.ContentPolicyViolationError as e:
+            raise ContentPolicyViolationError from e
+        except litellm.exceptions.BadRequestError as e:
+            if "is longer than the model's context length" in str(e):
                 raise ContextWindowExceededError from e
-            elif "content management policy" in str(e):
-                raise ContentPolicyViolationError from e
             raise
         self.logger.info(f"Response: {response}")
         try:
