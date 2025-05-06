@@ -10,10 +10,24 @@ import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 from threading import Lock
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, List, Literal
 
-import litellm
-import litellm.types.utils
+import openai
+from openai.types.chat import ChatCompletion
+from openai.types.chat.chat_completion import Choice
+from openai._exceptions import (
+    APIError,
+    RateLimitError,
+    AuthenticationError,
+    PermissionDeniedError,
+    NotFoundError,
+    BadRequestError,
+)
+import re
+
+# import litellm
+# import litellm.types.utils
+
 from pydantic import BaseModel as PydanticBaseModel
 from pydantic import ConfigDict, Field, SecretStr
 from swerex.exceptions import SwerexException
@@ -24,6 +38,7 @@ from tenacity import (
     stop_after_attempt,
     wait_random_exponential,
 )
+import tiktoken
 
 from sweagent import REPO_ROOT
 from sweagent.exceptions import (
@@ -45,11 +60,97 @@ try:
 except ImportError:
     readline = None
 
-litellm.suppress_debug_info = True
+# litellm.suppress_debug_info = True
 
+with (Path(__file__).parent / "all_models.json").open() as file:
+    ALL_MODELS = json.load(file)
 
 _THREADS_THAT_USED_API_KEYS = []
 """Keeps track of thread orders so that we can choose the same API key for the same thread."""
+
+
+def calculate_cost(model_name: str, input_tokens: int, output_tokens: int) -> float:
+    if model_name not in ALL_MODELS:
+        log_application_error("error", f"Model {model_name} not found in ALL_MODELS, cost will be 0.0")
+        raise ModelConfigurationError(f"Model {model_name} not found in ALL_MODELS, cost will be 0.0")
+
+    input_key = "input_cost_per_token_above_128k_tokens" if input_tokens > 128000 else "input_cost_per_token"
+    output_key = "output_cost_per_token_above_128k_tokens" if output_tokens > 128000 else "output_cost_per_token"
+    input_cost_per_token = ALL_MODELS[model_name].get(input_key, 0)
+    output_cost_per_token = ALL_MODELS[model_name].get(output_key, 0)
+
+    input_token_cost = input_cost_per_token * input_tokens
+    output_token_cost = output_cost_per_token * output_tokens
+    total_cost = input_token_cost + output_token_cost
+
+    return total_cost
+
+
+def num_tokens_from_messages(messages: list[dict], model: str) -> int:
+    """Returns the estimated number of tokens used by a list of messages.
+
+    Uses specific token counting logic for model families known from the OpenAI cookbook
+    (gpt-4o, gpt-4, gpt-3.5-turbo). If the model name does not match these patterns,
+    it falls back to an estimation of 1 token per 4 characters.
+
+    This version is concise and removes all logging/warnings.
+
+    Args:
+        messages: A list of dictionaries, where each dictionary represents a message.
+                  Expected keys: 'role', 'content', optional 'name'.
+        model: The name of the model (e.g., "gpt-4o-mini", "gpt-3.5-turbo-0125").
+
+    Returns:
+        An estimated integer count of tokens for the messages.
+    """
+    # Pattern to identify models known to follow the cookbook's (3, 1) token logic
+    # This covers base names and specific versions like gpt-4-0613, gpt-3.5-turbo-0125, etc.
+    known_model_pattern = r"^(gpt-4o|gpt-4|gpt-3\.5-turbo)"
+
+    encoding = None
+    if re.match(known_model_pattern, model):
+        try:
+            # Get the specific encoding for the known model pattern
+            encoding = tiktoken.encoding_for_model(model)
+        except KeyError:
+            # Model matches pattern but tiktoken doesn't know it (e.g., future version)
+            # Try falling back to common encodings for these families
+            try:
+                if model.startswith("gpt-4o"):
+                    encoding = tiktoken.get_encoding("o200k_base")
+                else:  # Assume cl100k_base for gpt-4 and gpt-3.5
+                    encoding = tiktoken.get_encoding("cl100k_base")
+            except KeyError:
+                # If even fallback encodings aren't found, we'll treat as unknown below
+                pass
+
+    if encoding:
+        # Use the precise calculation for known models
+        tokens_per_message = 3
+        tokens_per_name = 1
+        num_tokens = 0
+        for message in messages:
+            num_tokens += tokens_per_message
+            for key, value in message.items():
+                # Ensure value is a string; encode treats None as empty string ok usually
+                value_str = str(value) if value is not None else ""
+                try:
+                    # Add tokens for the key's value
+                    num_tokens += len(encoding.encode(value_str, disallowed_special=()))
+                except Exception:
+                    # Silently ignore errors encoding specific values
+                    pass  # Or potentially add char count estimate here? Keeping simple.
+            if "name" in message:  # Add name penalty only if 'name' key exists
+                num_tokens += tokens_per_name
+        num_tokens += 3  # Add final assistant priming tokens
+        return num_tokens
+    else:
+        # Fallback for unknown models or if encoding failed: estimate 1 token per 4 chars
+        total_chars = 0
+        for message in messages:
+            for value in message.values():
+                total_chars += len(str(value)) if value is not None else 0
+        return max(1, total_chars // 4)  # Ensure at least 1 token
 
 
 class RetryConfig(PydanticBaseModel):
@@ -563,25 +664,26 @@ class LiteLLMModel(AbstractModel):
         self.logger = get_logger("swea-lm", emoji="🤖")
 
         if tools.use_function_calling:
-            if not litellm.utils.supports_function_calling(model=self.config.name):
-                msg = (
-                    f"Model {self.config.name} does not support function calling. If your model"
-                    " does not support function calling, you can use `parse_function='thought_action'` instead. "
-                    "See https://swe-agent.com/latest/faq/ for more information."
-                )
-                self.logger.warning(msg)
+            pass
+            # if not litellm.utils.supports_function_calling(model=self.config.name):
+            #     msg = (
+            #         f"Model {self.config.name} does not support function calling. If your model"
+            #         " does not support function calling, you can use `parse_function='thought_action'` instead. "
+            #         "See https://swe-agent.com/latest/faq/ for more information."
+            #     )
+            #     self.logger.warning(msg)
 
         if self.config.max_input_tokens is not None:
             self.model_max_input_tokens = self.config.max_input_tokens
         else:
-            self.model_max_input_tokens = litellm.model_cost.get(self.config.name, {}).get("max_input_tokens")
+            self.model_max_input_tokens = ALL_MODELS.get(self.config.name, {}).get("max_input_tokens")
 
         if self.config.max_output_tokens is not None:
             self.model_max_output_tokens = self.config.max_output_tokens
         else:
-            self.model_max_output_tokens = litellm.model_cost.get(self.config.name, {}).get("max_output_tokens")
+            self.model_max_output_tokens = ALL_MODELS.get(self.config.name, {}).get("max_output_tokens")
 
-        self.lm_provider = litellm.model_cost.get(self.config.name, {}).get("litellm_provider")
+        self.lm_provider = ALL_MODELS.get(self.config.name, {}).get("litellm_provider")
 
     @property
     def instance_cost_limit(self) -> float:
@@ -639,7 +741,8 @@ class LiteLLMModel(AbstractModel):
         self, messages: list[dict[str, str]], n: int | None = None, temperature: float | None = None
     ) -> list[dict]:
         self._sleep()
-        input_tokens: int = litellm.utils.token_counter(messages=messages, model=self.config.name)
+        # input_tokens: int = litellm.utils.token_counter(messages=messages, model=self.config.name)
+        input_tokens: int = num_tokens_from_messages(messages=messages, model=self.config.name)
         if self.model_max_input_tokens is None:
             msg = (
                 f"No max input tokens found for model {self.config.name!r}. "
@@ -660,29 +763,30 @@ class LiteLLMModel(AbstractModel):
         if self.lm_provider == "anthropic":
             completion_kwargs["max_tokens"] = self.model_max_output_tokens
         try:
-            response: litellm.types.utils.ModelResponse = litellm.completion(  # type: ignore
+            client = openai.OpenAI(api_key=self.config.choose_api_key(), base_url=extra_args.pop("api_base", None))
+            response: ChatCompletion = client.chat.completions.create(
                 model=self.config.name,
                 messages=messages,
                 temperature=self.config.temperature if temperature is None else temperature,
                 top_p=self.config.top_p,
-                api_version=self.config.api_version,
-                api_key=self.config.choose_api_key(),
-                fallbacks=self.config.fallbacks,
+                n=n,
                 **completion_kwargs,
                 **extra_args,
-                n=n,
             )
-        except litellm.exceptions.ContextWindowExceededError as e:
+        except ContextWindowExceededError as e:
             raise ContextWindowExceededError from e
-        except litellm.exceptions.ContentPolicyViolationError as e:
+        except ContentPolicyViolationError as e:
             raise ContentPolicyViolationError from e
-        except litellm.exceptions.BadRequestError as e:
+        except BadRequestError as e:
             if "is longer than the model's context length" in str(e):
                 raise ContextWindowExceededError from e
             raise
+
         self.logger.info(f"Response: {response}")
         try:
-            cost = litellm.cost_calculator.completion_cost(response)
+            cost_model_name = self.config.name.split("/")[1] if "/" in self.config.name else self.config.name
+            cost = calculate_cost(cost_model_name, response.usage.prompt_tokens, response.usage.completion_tokens)
+            # cost = litellm.cost_calculator.completion_cost(response)
         except Exception as e:
             self.logger.debug(f"Error calculating cost: {e}, setting cost to 0.")
             if self.config.per_instance_cost_limit > 0 or self.config.total_cost_limit > 0:
@@ -694,13 +798,14 @@ class LiteLLMModel(AbstractModel):
                 self.logger.error(msg)
                 raise ModelConfigurationError(msg)
             cost = 0
-        choices: litellm.types.utils.Choices = response.choices  # type: ignore
+        choices: List[Choice] = response.choices  # type: ignore
         n_choices = n if n is not None else 1
         outputs = []
         output_tokens = 0
         for i in range(n_choices):
             output = choices[i].message.content or ""
-            output_tokens += litellm.utils.token_counter(text=output, model=self.config.name)
+            output_tokens += num_tokens_from_messages(messages=[{"content": output}], model=self.config.name)
+            # output_tokens += litellm.utils.token_counter(text=output, model=self.config.name)
             output_dict = {"message": output}
             if self.tools.use_function_calling:
                 if response.choices[i].message.tool_calls:  # type: ignore
@@ -747,16 +852,14 @@ class LiteLLMModel(AbstractModel):
                     ContextWindowExceededError,
                     CostLimitExceededError,
                     RuntimeError,
-                    litellm.exceptions.UnsupportedParamsError,
-                    litellm.exceptions.NotFoundError,
-                    litellm.exceptions.PermissionDeniedError,
-                    litellm.exceptions.ContextWindowExceededError,
-                    litellm.exceptions.APIError,
-                    litellm.exceptions.ContentPolicyViolationError,
                     TypeError,
-                    litellm.exceptions.AuthenticationError,
+                    NotFoundError,
+                    PermissionDeniedError,
+                    ContextWindowExceededError,  # already listed, but kept for clarity
+                    APIError,
                     ContentPolicyViolationError,
-                    ModelConfigurationError,
+                    AuthenticationError,
+                    ModelConfigurationError,  # custom or app-specific
                 )
             ),
             before_sleep=retry_warning,
