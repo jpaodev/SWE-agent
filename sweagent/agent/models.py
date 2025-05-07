@@ -71,8 +71,8 @@ _THREADS_THAT_USED_API_KEYS = []
 
 def calculate_cost(model_name: str, input_tokens: int, output_tokens: int) -> float:
     if model_name not in ALL_MODELS:
-        log_application_error("error", f"Model {model_name} not found in ALL_MODELS, cost will be 0.0")
-        raise ModelConfigurationError(f"Model {model_name} not found in ALL_MODELS, cost will be 0.0")
+        print(f"Model {model_name} not found in ALL_MODELS, cost will be 0.0")
+        return 0.0
 
     input_key = "input_cost_per_token_above_128k_tokens" if input_tokens > 128000 else "input_cost_per_token"
     output_key = "output_cost_per_token_above_128k_tokens" if output_tokens > 128000 else "output_cost_per_token"
