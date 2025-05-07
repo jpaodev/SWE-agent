@@ -1,6 +1,7 @@
 import re
 from typing import Any
 from urllib.parse import urlparse
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 import requests
 
@@ -137,9 +138,20 @@ def _get_gitlab_api_client(
 
     # Simple API client implementation using requests
     # This could be replaced with python-gitlab library for more comprehensive support
+    @retry(
+        stop=stop_after_attempt(int(os.getenv("GITLAB_API_RETRY_ATTEMPTS", 3))),
+        wait=wait_exponential(
+            multiplier=int(os.getenv("GITLAB_API_RETRY_MULTIPLIER", 1)),
+            min=int(os.getenv("GITLAB_API_RETRY_MIN", 2)),
+            max=int(os.getenv("GITLAB_API_RETRY_MAX", 10)),
+        ),
+        retry=retry_if_exception_type(requests.exceptions.RequestException),
+    )
     def make_request(method: str, endpoint: str, **kwargs):
         url = f"{gitlab_instance}/api/v4/{endpoint}"
-        response = requests.request(method, url, headers=headers, **kwargs)
+        response = requests.request(
+            method, url, headers=headers, timeout=int(os.getenv("GITLAB_API_TIMEOUT", 15)), **kwargs
+        )
         response.raise_for_status()
         return response.json()
 
