@@ -856,7 +856,7 @@ class LiteLLMModel(AbstractModel):
                     NotFoundError,
                     PermissionDeniedError,
                     ContextWindowExceededError,  # already listed, but kept for clarity
-                    APIError,
+                    # APIError,
                     ContentPolicyViolationError,
                     AuthenticationError,
                     ModelConfigurationError,  # custom or app-specific
