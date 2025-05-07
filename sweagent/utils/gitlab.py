@@ -166,7 +166,7 @@ def _get_gitlab_api_client(
             min=int(os.getenv("GITLAB_API_RETRY_MIN", 2)),
             max=int(os.getenv("GITLAB_API_RETRY_MAX", 10)),
         ),
-        retry=retry_if_exception_type(requests.exceptions.RequestException),
+        retry=retry_if_exception_type(Exception),
     )
     def make_request(method: str, endpoint: str, **kwargs):
         url = f"{gitlab_instance}/api/v4/{endpoint}"
